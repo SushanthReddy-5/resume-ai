@@ -9,7 +9,12 @@
     "lint": "eslint"
   },
   "dependencies": {
+    "@supabase/ssr": "^0.12.7",
+    "@supabase/supabase-js": "^2.116.0",
+    "mammoth": "^1.12.3",
     "next": "16.3.5",
+    "ollama": "^0.6.3",
+    "pdf2json": "^4.1.0",
     "react": "19.2.8",
     "react-dom": "19.2.8"
   },
