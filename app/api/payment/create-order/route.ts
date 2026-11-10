@@ -24,7 +24,10 @@ export async function POST() {
       receipt: `resume_${Date.now()}`,
     });
 
-    return NextResponse.json(order);
+    return NextResponse.json({
+      ...order,
+      key_id,
+    });
   } catch (error) {
     console.error("Razorpay order creation failed:", error);
 
