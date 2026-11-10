@@ -141,7 +141,10 @@ function ResumeContent({ resume }: { resume: string }) {
 
       <div className="space-y-6 text-sm leading-6 text-slate-700">
         {contentLines.map((line, index) => {
-          const normalized = line.toUpperCase().replace(/:$/, "").trim();
+          const normalized = line
+            .toUpperCase()
+            .replace(/:$/, "")
+            .trim();
 
           if (isHeading(line)) {
             return (
@@ -162,10 +165,7 @@ function ResumeContent({ resume }: { resume: string }) {
           const bullet = line.startsWith("•") || line.startsWith("-");
 
           return (
-            <p
-              key={index}
-              className={bullet ? "pl-3" : ""}
-            >
+            <p key={index} className={bullet ? "pl-3" : ""}>
               {line}
             </p>
           );
@@ -185,34 +185,113 @@ export default function Home() {
   const [userEmail, setUserEmail] = useState<string | null>(null);
   const [authLoading, setAuthLoading] = useState(true);
 
-  useEffect(() => {
-    async function getUser() {
-      const {
-        data: { user },
-      } = await supabase.auth.getUser();
+  // PREMIUM ACCESS STATE
+  const [hasAccess, setHasAccess] = useState(false);
+  const [accessLoading, setAccessLoading] = useState(true);
 
-      setUserEmail(user?.email ?? null);
-      setAuthLoading(false);
+  // CHECK VERIFIED PURCHASE STATUS
+  async function refreshAccess() {
+    try {
+      setAccessLoading(true);
+
+      const response = await fetch("/api/payment/status", {
+        method: "GET",
+        cache: "no-store",
+      });
+
+      const data = await response.json();
+
+      if (!response.ok) {
+        setHasAccess(false);
+        return false;
+      }
+
+      const accessGranted = data.hasAccess === true;
+
+      setHasAccess(accessGranted);
+
+      return accessGranted;
+    } catch (error) {
+      console.error("Unable to check premium access:", error);
+      setHasAccess(false);
+      return false;
+    } finally {
+      setAccessLoading(false);
+    }
+  }
+
+  // AUTHENTICATION AND PURCHASE STATUS
+  useEffect(() => {
+    let active = true;
+
+    async function initializeUser() {
+      try {
+        const {
+          data: { user },
+        } = await supabase.auth.getUser();
+
+        if (!active) return;
+
+        setUserEmail(user?.email ?? null);
+
+        if (user) {
+          await refreshAccess();
+        } else {
+          setHasAccess(false);
+          setAccessLoading(false);
+        }
+      } catch (error) {
+        console.error("Authentication check failed:", error);
+
+        if (active) {
+          setHasAccess(false);
+          setAccessLoading(false);
+        }
+      } finally {
+        if (active) {
+          setAuthLoading(false);
+        }
+      }
     }
 
-    getUser();
+    initializeUser();
 
     const {
       data: { subscription },
     } = supabase.auth.onAuthStateChange((_event, session) => {
-      setUserEmail(session?.user?.email ?? null);
+      if (!active) return;
+
+      const email = session?.user?.email ?? null;
+
+      setUserEmail(email);
+
+      if (session?.user) {
+        refreshAccess();
+      } else {
+        setHasAccess(false);
+        setAccessLoading(false);
+      }
+
       setAuthLoading(false);
     });
 
-    return () => subscription.unsubscribe();
+    return () => {
+      active = false;
+      subscription.unsubscribe();
+    };
   }, []);
 
+  // LOGOUT
   async function handleLogout() {
     await supabase.auth.signOut();
+
     setUserEmail(null);
+    setHasAccess(false);
+
     window.location.href = "/";
   }
 
+  // FILE UPLOAD
   function handleFileChange(event: ChangeEvent<HTMLInputElement>) {
     const file = event.target.files?.[0] || null;
 
@@ -220,6 +299,7 @@ export default function Home() {
     setError("");
   }
 
+  // FREE RESUME ANALYSIS
   async function analyzeResume() {
     if (!resumeFile) {
       setError("Please upload your resume first.");
@@ -264,94 +344,151 @@ export default function Home() {
     }
   }
 
- async function unlockApplication() {
-  try {
-    // Load Razorpay checkout
-    if (!(window as any).Razorpay) {
-      await new Promise<void>((resolve, reject) => {
-        const script = document.createElement("script");
-        script.src = "https://checkout.razorpay.com/v1/checkout.js";
-        script.onload = () => resolve();
-        script.onerror = () => reject(new Error("Razorpay failed to load."));
-        document.body.appendChild(script);
+  // RAZORPAY PAYMENT
+  async function unlockApplication() {
+    try {
+      if (authLoading) {
+        alert("Please wait while your account is loading.");
+        return;
+      }
+
+      if (!userEmail) {
+        alert("Please log in before purchasing the application package.");
+        window.location.href = "/login";
+        return;
+      }
+
+      // ALREADY PURCHASED
+      if (hasAccess) {
+        alert("Your Single Application package is already unlocked.");
+        return;
+      }
+
+      if (accessLoading) {
+        alert("Checking your purchase status. Please try again.");
+        return;
+      }
+
+      // LOAD RAZORPAY CHECKOUT
+      if (!(window as any).Razorpay) {
+        await new Promise<void>((resolve, reject) => {
+          const script = document.createElement("script");
+
+          script.src =
+            "https://checkout.razorpay.com/v1/checkout.js";
+
+          script.async = true;
+
+          script.onload = () => resolve();
+
+          script.onerror = () =>
+            reject(new Error("Razorpay failed to load."));
+
+          document.body.appendChild(script);
+        });
+      }
+
+      // CREATE PAYMENT ORDER
+      const response = await fetch("/api/payment/create-order", {
+        method: "POST",
       });
-    }
 
-    // Create payment order
-    const response = await fetch("/api/payment/create-order", {
-      method: "POST",
-    });
+      const data = await response.json();
 
-    const data = await response.json();
+      if (!response.ok) {
+        throw new Error(
+          data.error || "Unable to create payment order."
+        );
+      }
 
-    if (!response.ok) {
-      throw new Error(data.error || "Unable to create payment order.");
-    }
+      const options = {
+        key: data.key_id,
+        amount: data.amount,
+        currency: data.currency,
+        name: "ResumeAI",
+        description: "Single Application Package",
+        order_id: data.id,
 
-    const options = {
-      key: data.key_id,
-      amount: data.amount,
-      currency: data.currency,
-      name: "ResumeAI",
-      description: "Single Application Package",
-      order_id: data.id,
-      prefill: {
-        email: userEmail || "",
-      },
-      theme: {
-        color: "#2563eb",
-      },
-      handler: async function (payment: any) {
-        try {
-          const verifyResponse = await fetch("/api/payment/verify", {
-            method: "POST",
-            headers: {
-              "Content-Type": "application/json",
-            },
-            body: JSON.stringify({
-              razorpay_order_id: payment.razorpay_order_id,
-              razorpay_payment_id: payment.razorpay_payment_id,
-              razorpay_signature: payment.razorpay_signature,
-            }),
-          });
+        prefill: {
+          email: userEmail || "",
+        },
 
-          const result = await verifyResponse.json();
+        theme: {
+          color: "#2563eb",
+        },
 
-          if (!verifyResponse.ok) {
-            throw new Error(
-              result.error || "Payment verification failed."
+        handler: async function (payment: any) {
+          try {
+            // VERIFY PAYMENT ON SERVER
+            const verifyResponse = await fetch(
+              "/api/payment/verify",
+              {
+                method: "POST",
+                headers: {
+                  "Content-Type": "application/json",
+                },
+                body: JSON.stringify({
+                  razorpay_order_id:
+                    payment.razorpay_order_id,
+
+                  razorpay_payment_id:
+                    payment.razorpay_payment_id,
+
+                  razorpay_signature:
+                    payment.razorpay_signature,
+                }),
+              }
+            );
+
+            const verificationResult =
+              await verifyResponse.json();
+
+            if (!verifyResponse.ok) {
+              throw new Error(
+                verificationResult.error ||
+                  "Payment verification failed."
+              );
+            }
+
+            // REFRESH VERIFIED PURCHASE STATUS
+            const accessGranted = await refreshAccess();
+
+            if (accessGranted) {
+              alert(
+                "Payment successful! Your Single Application package is unlocked."
+              );
+            } else {
+              alert(
+                "Payment was verified, but access could not be refreshed. Please refresh the page or contact support."
+              );
+            }
+          } catch (error) {
+            alert(
+              error instanceof Error
+                ? error.message
+                : "Payment verification failed."
             );
           }
+        },
+      };
 
-          alert("Payment successful! Your application is unlocked.");
-        } catch (error) {
-          alert(
-            error instanceof Error
-              ? error.message
-              : "Payment verification failed."
-          );
-        }
-      },
-    };
+      const razorpay = new (window as any).Razorpay(options);
 
-    const razorpay = new (window as any).Razorpay(options);
-    razorpay.open();
-  } catch (error) {
-    alert(
-      error instanceof Error
-        ? error.message
-        : "Payment initialization failed."
-    );
+      razorpay.open();
+    } catch (error) {
+      alert(
+        error instanceof Error
+          ? error.message
+          : "Payment initialization failed."
+      );
+    }
   }
-}
 
   return (
     <main className="min-h-screen bg-slate-50 text-slate-900">
-
       {/* NAVBAR */}
       <nav className="sticky top-0 z-50 border-b border-slate-200 bg-white/95 backdrop-blur">
         <div className="mx-auto flex max-w-7xl items-center justify-between px-6 py-4">
-
           <a
             href="#top"
             className="text-xl font-extrabold tracking-tight text-slate-950"
@@ -360,17 +497,11 @@ export default function Home() {
           </a>
 
           <div className="hidden items-center gap-8 text-sm font-medium md:flex">
-            <a
-              href="#how-it-works"
-              className="hover:text-blue-600"
-            >
+            <a href="#how-it-works" className="hover:text-blue-600">
               How it works
             </a>
 
-            <a
-              href="#pricing"
-              className="hover:text-blue-600"
-            >
+            <a href="#pricing" className="hover:text-blue-600">
               Pricing
             </a>
           </div>
@@ -407,17 +538,12 @@ export default function Home() {
               </>
             )}
           </div>
-
         </div>
       </nav>
 
       {/* HERO */}
-      <section
-        id="top"
-        className="border-b border-slate-200 bg-white"
-      >
+      <section id="top" className="border-b border-slate-200 bg-white">
         <div className="mx-auto max-w-7xl px-6 py-20 text-center">
-
           <p className="mb-4 text-sm font-bold tracking-[0.2em] text-blue-600">
             AI-POWERED JOB APPLICATION ASSISTANT
           </p>
@@ -440,7 +566,6 @@ export default function Home() {
           >
             Analyze My Resume →
           </a>
-
         </div>
       </section>
 
@@ -449,14 +574,10 @@ export default function Home() {
         id="analyzer"
         className="mx-auto max-w-7xl px-6 py-16"
       >
-
         <div className="grid gap-8 lg:grid-cols-2">
-
           {/* RESUME */}
           <div className="rounded-2xl border border-slate-200 bg-white p-7 shadow-sm">
-
             <div className="mb-5 flex items-start gap-4">
-
               <div className="flex h-11 w-11 items-center justify-center rounded-xl bg-blue-50 text-xl">
                 📄
               </div>
@@ -470,11 +591,9 @@ export default function Home() {
                   PDF, DOCX or text resume
                 </p>
               </div>
-
             </div>
 
             <label className="block cursor-pointer rounded-xl border-2 border-dashed border-slate-300 p-7 text-center transition hover:border-blue-400 hover:bg-blue-50/30">
-
               <input
                 type="file"
                 accept=".pdf,.docx,.txt"
@@ -484,7 +603,6 @@ export default function Home() {
 
               {resumeFile ? (
                 <div>
-
                   <p className="font-semibold text-slate-900">
                     📄 {resumeFile.name}
                   </p>
@@ -496,7 +614,6 @@ export default function Home() {
                   <p className="mt-3 text-sm font-semibold text-emerald-600">
                     ✓ Resume ready for analysis
                   </p>
-
                 </div>
               ) : (
                 <>
@@ -509,16 +626,12 @@ export default function Home() {
                   </p>
                 </>
               )}
-
             </label>
-
           </div>
 
           {/* JOB DESCRIPTION */}
           <div className="rounded-2xl border border-slate-200 bg-white p-7 shadow-sm">
-
             <div className="mb-5 flex items-start gap-4">
-
               <div className="flex h-11 w-11 items-center justify-center rounded-xl bg-amber-50 text-xl">
                 💼
               </div>
@@ -532,7 +645,6 @@ export default function Home() {
                   Paste the complete job description
                 </p>
               </div>
-
             </div>
 
             <textarea
@@ -545,9 +657,7 @@ export default function Home() {
             <div className="mt-2 text-right text-xs text-slate-400">
               {jobDescription.length} characters
             </div>
-
           </div>
-
         </div>
 
         {error && (
@@ -561,17 +671,13 @@ export default function Home() {
           disabled={loading}
           className="mt-8 w-full rounded-xl bg-slate-950 px-6 py-4 font-bold text-white transition hover:bg-slate-800 disabled:cursor-not-allowed disabled:opacity-60"
         >
-          {loading
-            ? "Analyzing with AI..."
-            : "Analyze My Resume"}
+          {loading ? "Analyzing with AI..." : "Analyze My Resume"}
         </button>
 
         {/* RESULTS */}
         {result && (
           <div className="mt-16">
-
             <div className="mb-10 text-center">
-
               <p className="text-sm font-bold tracking-[0.2em] text-emerald-600">
                 ANALYSIS COMPLETE
               </p>
@@ -583,14 +689,11 @@ export default function Home() {
               <p className="mt-3 text-slate-500">
                 Here is how your resume matches this job description.
               </p>
-
             </div>
 
             {/* SCORE */}
             <div className="grid gap-6 md:grid-cols-3">
-
               <div className="rounded-2xl border border-slate-200 bg-white p-7 shadow-sm">
-
                 <p className="text-xs font-bold tracking-wider text-slate-500">
                   ATS JOB MATCH
                 </p>
@@ -606,17 +709,14 @@ export default function Home() {
                 <div className="mt-5 text-5xl font-extrabold text-blue-600">
                   {result.atsScore}%
                 </div>
-
               </div>
 
               <div className="rounded-2xl border border-slate-200 bg-white p-7 shadow-sm">
-
                 <p className="text-xs font-bold tracking-wider text-slate-500">
                   MATCHING SKILLS
                 </p>
 
                 <div className="mt-2 flex items-end gap-2">
-
                   <span className="text-4xl font-extrabold text-slate-950">
                     {result.matchingSkills.length}
                   </span>
@@ -624,29 +724,21 @@ export default function Home() {
                   <span className="pb-1 text-sm text-slate-500">
                     Found
                   </span>
-
                 </div>
 
                 <div className="mt-5 flex flex-wrap gap-2">
-
                   {result.matchingSkills.map((skill) => (
-                    <SkillChip key={skill}>
-                      {skill}
-                    </SkillChip>
+                    <SkillChip key={skill}>{skill}</SkillChip>
                   ))}
-
                 </div>
-
               </div>
 
               <div className="rounded-2xl border border-slate-200 bg-white p-7 shadow-sm">
-
                 <p className="text-xs font-bold tracking-wider text-slate-500">
                   MISSING SKILLS
                 </p>
 
                 <div className="mt-2 flex items-end gap-2">
-
                   <span className="text-4xl font-extrabold text-slate-950">
                     {result.missingSkills.length}
                   </span>
@@ -654,29 +746,20 @@ export default function Home() {
                   <span className="pb-1 text-sm text-slate-500">
                     Gaps
                   </span>
-
                 </div>
 
                 <div className="mt-5 flex flex-wrap gap-2">
-
                   {result.missingSkills.map((skill) => (
-                    <SkillChip
-                      key={skill}
-                      missing
-                    >
+                    <SkillChip key={skill} missing>
                       {skill}
                     </SkillChip>
                   ))}
-
                 </div>
-
               </div>
-
             </div>
 
             {/* KEYWORDS */}
             <div className="mt-8 rounded-2xl border border-slate-200 bg-white p-7 shadow-sm">
-
               <p className="text-xs font-bold tracking-wider text-blue-600">
                 ATS KEYWORDS
               </p>
@@ -686,25 +769,22 @@ export default function Home() {
               </h3>
 
               <p className="mt-1 text-sm text-slate-500">
-                {result.importantKeywords.length} keywords detected from the job description
+                {result.importantKeywords.length} keywords detected from
+                the job description
               </p>
 
               <div className="mt-5 flex flex-wrap gap-2">
-
                 {result.importantKeywords.map((keyword) => (
                   <KeywordChip key={keyword}>
                     {keyword}
                   </KeywordChip>
                 ))}
-
               </div>
-
             </div>
 
             {/* RESPONSIBILITIES */}
             {result.responsibilities?.length > 0 && (
               <div className="mt-8 rounded-2xl border border-slate-200 bg-white p-7 shadow-sm">
-
                 <p className="text-xs font-bold tracking-wider text-blue-600">
                   JOB RESPONSIBILITIES
                 </p>
@@ -714,7 +794,6 @@ export default function Home() {
                 </h3>
 
                 <div className="mt-5 grid gap-3 md:grid-cols-2">
-
                   {result.responsibilities.map((item, index) => (
                     <div
                       key={index}
@@ -727,17 +806,13 @@ export default function Home() {
                       {item}
                     </div>
                   ))}
-
                 </div>
-
               </div>
             )}
 
-            {/* TAILORED RESUME */}
+            {/* TAILORED RESUME PREVIEW */}
             <div className="mt-12">
-
               <div className="mb-6 text-center">
-
                 <p className="text-sm font-bold tracking-[0.2em] text-blue-600">
                   AI TAILORED RESUME
                 </p>
@@ -749,20 +824,14 @@ export default function Home() {
                 <p className="mt-3 text-slate-500">
                   Your resume is tailored specifically for this job.
                 </p>
-
               </div>
 
-              <ResumeContent
-                resume={result.tailoredResume}
-              />
-
+              <ResumeContent resume={result.tailoredResume} />
             </div>
 
             {/* PREMIUM APPLICATION */}
             <div className="mt-12 overflow-hidden rounded-3xl border border-blue-200 bg-gradient-to-br from-blue-50 via-white to-indigo-50 shadow-sm">
-
               <div className="p-8 md:p-10">
-
                 <p className="text-sm font-bold tracking-[0.18em] text-blue-600">
                   PREMIUM APPLICATION
                 </p>
@@ -772,11 +841,11 @@ export default function Home() {
                 </h2>
 
                 <p className="mt-3 max-w-2xl text-slate-600">
-                  Get everything you need to move from resume analysis to application.
+                  Get everything you need to move from resume analysis
+                  to application.
                 </p>
 
                 <div className="mt-7 grid gap-3 md:grid-cols-2">
-
                   {[
                     "Fully tailored resume",
                     "PDF & DOCX download",
@@ -792,19 +861,15 @@ export default function Home() {
                       ✓ {item}
                     </div>
                   ))}
-
                 </div>
 
                 <div className="mt-8 flex flex-col gap-5 rounded-2xl border border-blue-100 bg-white p-6 md:flex-row md:items-center md:justify-between">
-
                   <div>
-
                     <p className="text-sm font-bold text-slate-500">
                       SINGLE APPLICATION
                     </p>
 
                     <div className="mt-1 flex items-baseline gap-2">
-
                       <span className="text-4xl font-extrabold text-slate-950">
                         ₹199
                       </span>
@@ -812,31 +877,41 @@ export default function Home() {
                       <span className="text-sm text-slate-500">
                         one application
                       </span>
-
                     </div>
 
+                    <p className="mt-2 text-sm font-semibold">
+                      {accessLoading
+                        ? "Checking purchase status..."
+                        : hasAccess
+                          ? "✓ Your package is unlocked"
+                          : "Premium package locked"}
+                    </p>
                   </div>
 
-                  <button
-                    onClick={unlockApplication}
-                    className="rounded-xl bg-blue-600 px-6 py-3.5 font-bold text-white shadow-lg shadow-blue-600/20 transition hover:bg-blue-700"
-                  >
-                    Unlock Full Application →
-                  </button>
-
+                  {hasAccess && !accessLoading ? (
+                    <div className="rounded-xl bg-emerald-100 px-6 py-3.5 text-center font-bold text-emerald-700">
+                      ✓ Application Unlocked
+                    </div>
+                  ) : (
+                    <button
+                      onClick={unlockApplication}
+                      disabled={accessLoading || authLoading}
+                      className="rounded-xl bg-blue-600 px-6 py-3.5 font-bold text-white shadow-lg shadow-blue-600/20 transition hover:bg-blue-700 disabled:cursor-not-allowed disabled:opacity-60"
+                    >
+                      {accessLoading
+                        ? "Checking..."
+                        : "Unlock Full Application →"}
+                    </button>
+                  )}
                 </div>
 
                 <p className="mt-4 text-center text-xs text-slate-400">
-                  Secure payment • Instant access
+                  Secure payment • Verified access
                 </p>
-
               </div>
-
             </div>
-
           </div>
         )}
-
       </section>
 
       {/* HOW IT WORKS */}
@@ -844,11 +919,8 @@ export default function Home() {
         id="how-it-works"
         className="border-y border-slate-200 bg-white"
       >
-
         <div className="mx-auto max-w-7xl px-6 py-20">
-
           <div className="text-center">
-
             <p className="text-sm font-bold tracking-[0.2em] text-blue-600">
               HOW IT WORKS
             </p>
@@ -858,13 +930,12 @@ export default function Home() {
             </h2>
 
             <p className="mx-auto mt-3 max-w-2xl text-slate-500">
-              Four simple steps to turn your existing resume into a job-specific application.
+              Four simple steps to turn your existing resume into a
+              job-specific application.
             </p>
-
           </div>
 
           <div className="mt-12 grid gap-6 md:grid-cols-4">
-
             {[
               ["01", "Upload Resume", "Add your existing resume."],
               ["02", "Add Job", "Paste the job description."],
@@ -883,7 +954,6 @@ export default function Home() {
                 key={number}
                 className="rounded-2xl border border-slate-200 bg-slate-50 p-6"
               >
-
                 <span className="text-sm font-extrabold text-blue-600">
                   {number}
                 </span>
@@ -895,26 +965,16 @@ export default function Home() {
                 <p className="mt-2 text-sm leading-6 text-slate-500">
                   {description}
                 </p>
-
               </div>
             ))}
-
           </div>
-
         </div>
-
       </section>
 
       {/* PRICING */}
-      <section
-        id="pricing"
-        className="bg-slate-50"
-      >
-
+      <section id="pricing" className="bg-slate-50">
         <div className="mx-auto max-w-7xl px-6 py-20">
-
           <div className="text-center">
-
             <p className="text-sm font-bold tracking-[0.2em] text-blue-600">
               SIMPLE PRICING
             </p>
@@ -924,16 +984,14 @@ export default function Home() {
             </h2>
 
             <p className="mx-auto mt-3 max-w-2xl text-slate-500">
-              Start free. Pay for individual applications or let ResumeAI help manage your entire job hunt.
+              Start free. Pay for individual applications or let
+              ResumeAI help manage your entire job hunt.
             </p>
-
           </div>
 
           <div className="mx-auto mt-12 grid max-w-5xl gap-6 lg:grid-cols-3">
-
             {/* FREE */}
             <div className="rounded-2xl border border-slate-200 bg-white p-7 shadow-sm">
-
               <p className="text-sm font-bold text-slate-500">
                 FREE
               </p>
@@ -961,12 +1019,10 @@ export default function Home() {
               >
                 Start Free
               </a>
-
             </div>
 
             {/* SINGLE APPLICATION */}
             <div className="relative rounded-2xl border-2 border-blue-500 bg-white p-7 shadow-xl shadow-blue-500/10">
-
               <div className="absolute right-5 top-5 rounded-full bg-blue-600 px-3 py-1 text-xs font-bold text-white">
                 POPULAR
               </div>
@@ -993,24 +1049,30 @@ export default function Home() {
                 <p>✓ Job-specific improvements</p>
               </div>
 
-              <button
-                onClick={unlockApplication}
-                className="mt-8 w-full rounded-xl bg-blue-600 px-5 py-3 font-bold text-white transition hover:bg-blue-700"
-              >
-                Get Application →
-              </button>
-
+              {hasAccess && !accessLoading ? (
+                <div className="mt-8 w-full rounded-xl bg-emerald-100 px-5 py-3 text-center font-bold text-emerald-700">
+                  ✓ Package Unlocked
+                </div>
+              ) : (
+                <button
+                  onClick={unlockApplication}
+                  disabled={accessLoading || authLoading}
+                  className="mt-8 w-full rounded-xl bg-blue-600 px-5 py-3 font-bold text-white transition hover:bg-blue-700 disabled:cursor-not-allowed disabled:opacity-60"
+                >
+                  {accessLoading
+                    ? "Checking..."
+                    : "Get Application →"}
+                </button>
+              )}
             </div>
 
             {/* JOB HUNTER */}
             <div className="rounded-2xl border border-slate-200 bg-slate-950 p-7 text-white shadow-xl">
-
               <p className="text-sm font-bold text-blue-300">
                 JOB HUNTER
               </p>
 
               <div className="mt-3 flex items-baseline gap-2">
-
                 <span className="text-4xl font-extrabold">
                   ₹599
                 </span>
@@ -1018,7 +1080,6 @@ export default function Home() {
                 <span className="text-sm text-slate-400">
                   /month
                 </span>
-
               </div>
 
               <p className="mt-2 text-sm text-slate-400">
@@ -1047,20 +1108,14 @@ export default function Home() {
               >
                 Start Job Hunter →
               </button>
-
             </div>
-
           </div>
-
         </div>
-
       </section>
 
       {/* FOOTER */}
       <footer className="border-t border-slate-200 bg-white">
-
         <div className="mx-auto max-w-7xl px-6 py-8 text-center">
-
           <p className="font-extrabold text-slate-950">
             ResumeAI
           </p>
@@ -1068,11 +1123,8 @@ export default function Home() {
           <p className="mt-2 text-sm text-slate-500">
             © 2026 ResumeAI. AI-powered job applications.
           </p>
-
         </div>
-
       </footer>
-
     </main>
   );
 }
