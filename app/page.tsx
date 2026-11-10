@@ -264,11 +264,61 @@ export default function Home() {
     }
   }
 
-  function unlockApplication() {
+ async function unlockApplication() {
+  try {
+    // Load Razorpay checkout script
+    const script = document.createElement("script");
+    script.src = "https://checkout.razorpay.com/v1/checkout.js";
+    script.async = true;
+
+    await new Promise<void>((resolve, reject) => {
+      script.onload = () => resolve();
+      script.onerror = () => reject(new Error("Unable to load Razorpay."));
+      document.body.appendChild(script);
+    });
+
+    // Create payment order
+    const response = await fetch("/api/payment/create-order", {
+      method: "POST",
+    });
+
+    const data = await response.json();
+
+    if (!response.ok) {
+      throw new Error(data.error || "Unable to create payment order.");
+    }
+
+    // Open Razorpay checkout
+    const options = {
+      key: data.key_id,
+      amount: data.amount,
+      currency: data.currency,
+      name: "ResumeAI",
+      description: "Single Application Package",
+      order_id: data.id,
+      prefill: {
+        email: userEmail || "",
+      },
+      theme: {
+        color: "#2563eb",
+      },
+      handler: function (payment: any) {
+        alert(
+          "Payment completed! Payment ID: " + payment.razorpay_payment_id
+        );
+      },
+    };
+
+    const razorpay = new (window as any).Razorpay(options);
+    razorpay.open();
+  } catch (error) {
     alert(
-      "Payment integration will be connected here. The Single Application package is ₹199."
+      error instanceof Error
+        ? error.message
+        : "Payment initialization failed."
     );
   }
+}
 
   return (
     <main className="min-h-screen bg-slate-50 text-slate-900">
