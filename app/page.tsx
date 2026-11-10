@@ -302,12 +302,35 @@ export default function Home() {
       theme: {
         color: "#2563eb",
       },
-      handler: function (payment: any) {
-        alert(
-          "Payment completed! Payment ID: " + payment.razorpay_payment_id
-        );
+    handler: async function (payment: any) {
+  try {
+    const response = await fetch("/api/payment/verify", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
       },
-    };
+      body: JSON.stringify({
+        razorpay_order_id: payment.razorpay_order_id,
+        razorpay_payment_id: payment.razorpay_payment_id,
+        razorpay_signature: payment.razorpay_signature,
+      }),
+    });
+
+    const result = await response.json();
+
+    if (!response.ok) {
+      throw new Error(result.error || "Payment verification failed.");
+    }
+
+    alert("Payment verified successfully!");
+  } catch (error) {
+    alert(
+      error instanceof Error
+        ? error.message
+        : "Payment verification failed."
+    );
+  }
+},
 
     const razorpay = new (window as any).Razorpay(options);
     razorpay.open();
